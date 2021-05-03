@@ -1,6 +1,6 @@
 {
   "name": "spring-nextgen-dl",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "SpringRTS NextGen download system",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,6 +11,7 @@
     "url": "git+https://github.com/gajop/spring-nextgen-dl.git"
   },
   "scripts": {
+    "prepublish": "npm run build",
     "build": "tsc",
     "test": "jest",
     "lint": "eslint . --ext .ts"

@@ -4,8 +4,6 @@ import path from 'path';
 import zlib from 'zlib';
 import readline from 'readline';
 
-// import log from 'electron-log';
-
 import { Butler } from './butler';
 import { parse, fillChannelPlatform } from './nextgen_version_parse';
 import { NextGenRapidCompat } from './nextgen_rapid_compat';
