@@ -11,7 +11,7 @@
     "url": "git+https://github.com/gajop/spring-nextgen-dl.git"
   },
   "scripts": {
-    "prepublish": "npm run build",
+    "prepublishOnly": "npm run build",
     "build": "tsc",
     "test": "jest",
     "lint": "eslint . --ext .ts"
