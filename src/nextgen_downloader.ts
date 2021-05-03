@@ -82,18 +82,12 @@ class NextGenDownloader extends EventEmitter {
 
 		this.butler = new Butler(butlerPath, this.tmpDir);
 
-		// this.butlerDl.on('aborted', msg => {
-		// 	this.emit('aborted', this.name, msg);
-		// });
-
-		this.butler.on('warn', (msg: string) => {
-			this.emit('log', 'warn', msg);
-		});
-
-		this.butler.on('warn', (msg: string) => {
-			this.emit('log', 'warn', msg);
+		this.butler.on('log', (level: string, msg: string) => {
+			this.emit('log', level, `Butler: ${msg}`);
 		});
 	}
+
+	/// API
 
 	async download(fullName: string): Promise<void> {
 		try {
@@ -103,6 +97,16 @@ class NextGenDownloader extends EventEmitter {
 			this.emit('log', 'error', err);
 		}
 	}
+
+	async downloadMetadata(fullName: string): Promise<void> {
+		await this.downloadMetadataInternal(fullName).catch(err => {
+			this.emit('log', 'error', err);
+			this.emit('log', 'info', typeof err);
+			throw err;
+		});
+	}
+
+	/// END API
 
 	private stopDownload(): void {
 		// TODO
@@ -192,14 +196,6 @@ class NextGenDownloader extends EventEmitter {
 		}
 
 		this.emit('finished', name);
-	}
-
-	private async downloadMetadata(fullName: string): Promise<void> {
-		await this.downloadMetadataInternal(fullName).catch(err => {
-			this.emit('log', 'error', err);
-			this.emit('log', 'info', typeof err);
-			throw err;
-		});
 	}
 
 	// DRY this and downloadInternal

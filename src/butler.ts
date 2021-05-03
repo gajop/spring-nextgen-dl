@@ -83,7 +83,7 @@ export class Butler extends EventEmitter {
 
 			const rlStderr = readline.createInterface({ input: process.stderr });
 			rlStderr.on('line', line => {
-				this.emit('warn', line);
+				this.emit('log', 'warn', line);
 			});
 
 
@@ -156,9 +156,8 @@ export class Butler extends EventEmitter {
 			const rlStderr = readline.createInterface({ input: process.stderr });
 			rlStderr.on('line', line => {
 				if (line.includes('connect: connection refuse')) {
-					this.emit('log', 'info', 'Connection refused error');
+					this.emit('log', 'warn', 'Connection refused error');
 				}
-				this.emit('warn', line);
 			});
 
 			process.on('close', code => {
