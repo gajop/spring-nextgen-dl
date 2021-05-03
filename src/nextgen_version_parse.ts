@@ -68,7 +68,15 @@ export function parseWithDefaults(fullName: string): Version {
 	return fillEmptyWithDefaults(parse(fullName));
 }
 
-export function fillChannelPlatform(obj: Version, pkgInfo: any): Version {
+interface PkgInfo {
+	channels: Channel[]
+}
+
+interface Channel {
+	platform: string[],
+}
+
+export function fillChannelPlatform(obj: Version, pkgInfo: PkgInfo): Version {
 	// If channel is specified require an exact match.
 	// If no channel is specified prefer main but accept anything
 	const matchChannelExactly = obj.channel != null;

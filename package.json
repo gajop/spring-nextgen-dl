@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "jest"
+    "test": "jest",
+    "lint": "./node_modules/.bin/eslint . --ext .ts"
   },
   "keywords": [],
   "dependencies": {
