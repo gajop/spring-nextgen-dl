@@ -1,15 +1,17 @@
-'use strict';
-
 const platformName = process.platform;
+
+if (platformName != 'win32' && platformName != 'linux' && platformName != 'darwin') {
+	throw 'Unsupported platform';
+}
+
 const platformMap = {
 	'win32': 'windows-amd64',
 	'linux': 'linux-amd64',
 	'darwin': 'darwin-amd64',
 	'any': 'any'
 };
-const defaultPlatform = platformMap[platformName];
-const defaultChannel = 'main';
-const defaultVersion = 'latest';
+export const defaultPlatform: string = platformMap[platformName];
+export const defaultChannel = 'main';
 
 // fullName format: 'user/repo@channel:version#platform'
 // channel, version and platform are optional
@@ -24,15 +26,23 @@ const fullNameRegex = new RegExp(
 	'$'
 );
 
-function parse(fullName) {
+export interface Version {
+	user: string;
+	repo: string;
+	channel?: string;
+	platform?: string;
+	version?: number;
+}
+
+export function parse(fullName: string): Version {
 	const match = fullNameRegex.exec(fullName);
-	if (match === null) {
+	if (match == null || match.groups == null) {
 		throw `Failed to parse: ${fullName}`;
 	}
 
-	let obj = {
+	const obj: Version = {
 		user: match.groups.user,
-		repo: match.groups.repo,
+		repo: match.groups.repo
 	};
 
 	if (match.groups.version != null) {
@@ -48,32 +58,31 @@ function parse(fullName) {
 	return obj;
 }
 
-function fillEmptyWithDefaults(obj) {
-	obj.version = obj.version != null ? obj.version : defaultVersion;
+export function fillEmptyWithDefaults(obj: Version): Version {
 	obj.channel = obj.channel != null ? obj.channel : defaultChannel;
 	obj.platform = obj.platform != null ? obj.platform : defaultPlatform;
 	return obj;
 }
 
-function parseWithDefaults(fullName) {
+export function parseWithDefaults(fullName: string): Version {
 	return fillEmptyWithDefaults(parse(fullName));
 }
 
-function fillChannelPlatform(obj, pkgInfo) {
+export function fillChannelPlatform(obj: Version, pkgInfo: any): Version {
 	// If channel is specified require an exact match.
 	// If no channel is specified prefer main but accept anything
 	const matchChannelExactly = obj.channel != null;
 	let channel = null;
-	let platforms = null;
+	let platforms: string[] | null = null;
 	for (const [remoteChannel, remotePlatforms] of Object.entries(pkgInfo['channels'])) {
 		if (matchChannelExactly) {
-			if (remoteChannel === obj.channel) {
+			if (remoteChannel === obj.channel && Array.isArray(remotePlatforms)) {
 				channel = remoteChannel;
 				platforms = remotePlatforms;
 				break;
 			}
 		} else {
-			if (channel == null || remoteChannel === 'main') {
+			if ((channel == null || remoteChannel === 'main') && Array.isArray(remotePlatforms)) {
 				channel = remoteChannel;
 				platforms = remotePlatforms;
 
@@ -84,7 +93,7 @@ function fillChannelPlatform(obj, pkgInfo) {
 		}
 	}
 
-	if (channel == null) {
+	if (channel == null || platforms == null) {
 		throw 'No matching channel found';
 	}
 
@@ -117,12 +126,3 @@ function fillChannelPlatform(obj, pkgInfo) {
 	obj.platform = platform;
 	return obj;
 }
-
-module.exports = {
-	parse: parse,
-	parseWithDefaults: parseWithDefaults,
-	fillEmptyWithDefaults: fillEmptyWithDefaults,
-	fillChannelPlatform: fillChannelPlatform,
-	defaultChannel: defaultChannel,
-	defaultPlatform: defaultPlatform,
-};

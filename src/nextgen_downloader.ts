@@ -1,23 +1,20 @@
-'use strict';
+import EventEmitter from 'events';
+import fs from 'fs';
+import path from 'path';
+import zlib from 'zlib';
+import readline from 'readline';
 
-const EventEmitter = require('events');
-const fs = require('fs');
-const path = require('path');
-const zlib = require('zlib');
-const readline = require('readline');
+// import log from 'electron-log';
 
-const log = require('electron-log');
-
-const ButlerDownload = require('./butler_dl');
-const ButlerApply = require('./butler_apply');
-const springPlatform = require('./spring_platform');
-const { parse, fillChannelPlatform } = require('./nextgen_version_parse');
-const { makeParentDir, makeDir } = require('./fs_utils');
+import { Butler } from './butler';
+import { parse, fillChannelPlatform } from './nextgen_version_parse';
+import { NextGenRapidCompat } from './nextgen_rapid_compat';
+import { makeParentDir, makeDir } from './fs_utils';
+import { getPkgDir } from './nextgen_utils';
 
 const isDev = false;
 const PKG_URL = isDev ? 'http://0.0.0.0:8000/pkg' : 'https://content.spring-launcher.com/pkg';
 const FALLBACK_URL = isDev ? PKG_URL : 'https://spring-launcher.ams3.digitaloceanspaces.com/pkg';
-const PKG_DIR = `${springPlatform.writePath}/pkgs`;
 
 const PKG_INFO_CACHE_TIME = 3600;
 const LATEST_VERSION_CACHE_TIME = 300;
@@ -35,14 +32,40 @@ const LATEST_VERSION_CACHE_TIME = 300;
 
 const SYSTEM_VERSION = 3;
 
+interface PatchVersion {
+	fromVersion: number,
+	toVersion: number
+}
+
+interface Version {
+	name: string,
+	version: number
+}
+
 class NextGenDownloader extends EventEmitter {
-	constructor() {
+	private butler: Butler;
+
+	private butlerPath: string;
+	private springWritePath: string;
+	private pkgDir: string;
+	private tmpDir: string;
+	private nextgenRapidCompat: NextGenRapidCompat;
+
+	constructor(butlerPath: string, springWritePath: string) {
 		super();
+
+		this.butlerPath = butlerPath;
+		this.springWritePath = springWritePath;
+		this.nextgenRapidCompat = new NextGenRapidCompat(this.springWritePath);
+
+		this.pkgDir = getPkgDir(this.springWritePath);
+
+		this.tmpDir = path.join(springWritePath, 'tmp');
 
 		/*
 		// TODO: or not TODO
 		// Check if any patches were in progress and correct any mistakes
-		let inProgressFile = `${PKG_DIR}/.inprogress`;
+		let inProgressFile = `${this.pkgDir}/.inprogress`;
 		if (fs.existsSync(inProgressFile)) {
 			const inProgress = JSON.parse(fs.readFileSync(inProgressFile));
 
@@ -57,67 +80,70 @@ class NextGenDownloader extends EventEmitter {
 
 		this.systemVersionCheck();
 
-		this.butlerDl = new ButlerDownload();
-		this.butlerApply = new ButlerApply();
+		this.butler = new Butler(butlerPath, this.tmpDir);
 
 		// this.butlerDl.on('aborted', msg => {
 		// 	this.emit('aborted', this.name, msg);
 		// });
 
-		this.butlerDl.on('warn', msg => {
-			log.warn(msg);
+		this.butler.on('warn', (msg: string) => {
+			this.emit('log', 'warn', msg);
 		});
 
-		this.butlerApply.on('warn', msg => {
-			log.warn(msg);
+		this.butler.on('warn', (msg: string) => {
+			this.emit('log', 'warn', msg);
 		});
 	}
 
-	systemVersionCheck() {
+	async download(fullName: string): Promise<void> {
+		try {
+			await this.downloadInternal(fullName);
+		} catch (err) {
+			this.emit('failed', fullName, `Download failed ${fullName}`);
+			this.emit('log', 'error', err);
+		}
+	}
+
+	private stopDownload(): void {
+		// TODO
+	}
+
+	private systemVersionCheck(): void {
 		const existingVersion = this.getSystemVersion();
 
 		if (existingVersion == SYSTEM_VERSION) {
 			return;
 		}
 
-		log.info(`System upgrade: ${existingVersion} -> ${SYSTEM_VERSION}`);
+		this.emit('log', 'info', `System upgrade: ${existingVersion} -> ${SYSTEM_VERSION}`);
 
-		if (fs.existsSync(PKG_DIR)) {
-			fs.rmdirSync(PKG_DIR, { recursive: true });
+		if (fs.existsSync(this.pkgDir)) {
+			fs.rmdirSync(this.pkgDir, { recursive: true });
 		}
-		fs.mkdirSync(PKG_DIR);
+		fs.mkdirSync(this.pkgDir);
 
-		const systemVersionJson = path.join(PKG_DIR, 'system.json');
+		const systemVersionJson = path.join(this.pkgDir, 'system.json');
 		fs.writeFileSync(systemVersionJson, JSON.stringify({
 			version: SYSTEM_VERSION
 		}));
 	}
 
-	getSystemVersion() {
-		const systemVersionJson = path.join(PKG_DIR, 'system.json');
+	private getSystemVersion(): number {
+		const systemVersionJson = path.join(this.pkgDir, 'system.json');
 		if (!fs.existsSync(systemVersionJson)) {
 			return 0;
 		}
 
 		try {
-			return JSON.parse(fs.readFileSync(systemVersionJson))['version'];
+			return JSON.parse(fs.readFileSync(systemVersionJson, 'utf8'))['version'];
 		} catch (err) {
-			log.info(`Failed to parse ${systemVersionJson}, resetting`);
+			this.emit('log', 'info', `Failed to parse ${systemVersionJson}, resetting`);
 			fs.unlinkSync(systemVersionJson);
 			return 0;
 		}
 	}
 
-	async download(fullName) {
-		try {
-			await this.downloadInternal(fullName);
-		} catch (err) {
-			this.emit('failed', fullName, `Download failed ${fullName}`);
-			log.error(err);
-		}
-	}
-
-	async downloadInternal(fullName) {
+	private async downloadInternal(fullName: string): Promise<void> {
 		let parsed = parse(fullName);
 		const name = parsed.user + '/' + parsed.repo;
 		this.emit('started', `${fullName}: metadata`);
@@ -131,7 +157,7 @@ class NextGenDownloader extends EventEmitter {
 		const urlPart = `${name}/${channel}/${platform}`;
 
 		const localVersion = this.queryLocalVersion(name);
-		const targetVersion = await (
+		const targetVersion: Version = await (
 			versionID != null
 				? this.queryRemoteVersion(urlPart, versionID)
 				: this.queryLatestVersion(urlPart)
@@ -139,13 +165,13 @@ class NextGenDownloader extends EventEmitter {
 
 		if (localVersion != null) {
 			if (localVersion['version'] == targetVersion['version']) {
-				log.info(`No download necessary for ${fullName}`);
+				this.emit('log', 'info', `No download necessary for ${fullName}`);
 
-				const rapidTag = pkgInfo['rapid'];
+				const rapidTag: string = pkgInfo['rapid'];
 				if (rapidTag != null && versionID == null) {
-					const versionsGz = path.join(springPlatform.writePath, `rapid/repos.springrts.com/${rapidTag}/versions.gz`);
+					const versionsGz = path.join(this.springWritePath, `rapid/repos.springrts.com/${rapidTag}/versions.gz`);
 					if (!fs.existsSync(versionsGz)) {
-						this.maybeUpdateRapid(pkgInfo, targetVersion);
+						this.updateRapidTag(rapidTag, targetVersion);
 					}
 				}
 
@@ -154,26 +180,30 @@ class NextGenDownloader extends EventEmitter {
 			}
 		}
 
-		await this.downloadPackage(pkgInfo, fullName, name, urlPart, localVersion, targetVersion);
+		const packagePath = pkgInfo['path'];
+		await this.downloadPackage(packagePath, fullName, name, urlPart, localVersion['version'], targetVersion);
 		this.updateLocalVersion(name, targetVersion);
 		if (versionID == null) {
-			// TODO: also fill this in case versionID is specified as latest
-			this.maybeUpdateRapid(pkgInfo, targetVersion);
+			const rapidTag = pkgInfo['rapid'];
+			if (rapidTag != null) {
+				// TODO: also fill this in case versionID is specified as latest?
+				this.updateRapidTag(rapidTag, targetVersion);
+			}
 		}
 
 		this.emit('finished', name);
 	}
 
-	async downloadMetadata(fullName) {
+	private async downloadMetadata(fullName: string): Promise<void> {
 		await this.downloadMetadataInternal(fullName).catch(err => {
-			log.error(err);
-			log.info(typeof err);
+			this.emit('log', 'error', err);
+			this.emit('log', 'info', typeof err);
 			throw err;
 		});
 	}
 
 	// DRY this and downloadInternal
-	async downloadMetadataInternal(fullName) {
+	private async downloadMetadataInternal(fullName: string): Promise<void> {
 		let parsed = parse(fullName);
 		const name = parsed.user + '/' + parsed.repo;
 		this.emit('started', `${fullName}: metadata`);
@@ -193,47 +223,47 @@ class NextGenDownloader extends EventEmitter {
 		);
 	}
 
-	async queryPackageInfo(name) {
+	private async queryPackageInfo(name: string) {
 		return this.queryWithCache(`${name}/package-info.json`, PKG_INFO_CACHE_TIME);
 	}
 
-	queryLocalVersion(name) {
-		const versionInfo = `${PKG_DIR}/${name}/local-version.json`;
+	private queryLocalVersion(name: string) {
+		const versionInfo = `${this.pkgDir}/${name}/local-version.json`;
 		if (!fs.existsSync(versionInfo)) {
 			return null;
 		}
-		return JSON.parse(fs.readFileSync(versionInfo));
+		return JSON.parse(fs.readFileSync(versionInfo, 'utf8'));
 	}
 
-	async queryLatestVersion(urlPart) {
+	private async queryLatestVersion(urlPart: string): Promise<Version> {
 		return this.queryWithCache(`${urlPart}/latest.json`, LATEST_VERSION_CACHE_TIME);
 	}
 
-	async queryRemoteVersion(urlPart, version) {
-		const versionInfo = this.queryFileIfNotExist(`${urlPart}/patch/${version}.json`);
+	private async queryRemoteVersion(urlPart: string, version: number): Promise<Version> {
+		const versionInfo = await this.queryFileIfNotExist(`${urlPart}/patch/${version}.json`);
 		return {
 			version: version,
 			name: versionInfo['name']
 		};
 	}
 
-	async queryWithCache(baseUrl, cacheTime) {
-		const localFile = `${PKG_DIR}/${baseUrl}`;
+	private async queryWithCache(baseUrl: string, cacheTime: number) {
+		const localFile = `${this.pkgDir}/${baseUrl}`;
 		let shouldQueryRemote = true;
 		if (fs.existsSync(localFile)) {
 			const stat = fs.statSync(localFile);
 			const now = new Date();
-			if (now - stat.mtime < cacheTime * 1000) {
+			if (+now - (+stat.mtime) < cacheTime * 1000) {
 				shouldQueryRemote = false;
 			}
 		}
 
 		while (true) {
 			if (shouldQueryRemote) {
-				await downloadFileWithFallback(this.butlerDl, baseUrl, localFile);
+				await downloadFileWithFallback(this.butler, baseUrl, localFile);
 			}
 			try {
-				return JSON.parse(fs.readFileSync(localFile));
+				return JSON.parse(fs.readFileSync(localFile, 'utf8'));
 			} catch (err) {
 				if (shouldQueryRemote) {
 					// we already queried once, nothing we can do
@@ -246,16 +276,16 @@ class NextGenDownloader extends EventEmitter {
 		}
 	}
 
-	async queryFileIfNotExist(baseUrl) {
-		const localFile = `${PKG_DIR}/${baseUrl}`;
+	private async queryFileIfNotExist(baseUrl: string) {
+		const localFile = `${this.pkgDir}/${baseUrl}`;
 		let shouldQueryRemote = !fs.existsSync(localFile);
 
 		while (true) {
 			if (shouldQueryRemote) {
-				await downloadFileWithFallback(this.butlerDl, baseUrl, localFile);
+				await downloadFileWithFallback(this.butler, baseUrl, localFile);
 			}
 			try {
-				return JSON.parse(fs.readFileSync(localFile));
+				return JSON.parse(fs.readFileSync(localFile, 'utf8'));
 			} catch (err) {
 				if (shouldQueryRemote) {
 					// we already queried once, nothing we can do
@@ -268,32 +298,32 @@ class NextGenDownloader extends EventEmitter {
 		}
 	}
 
-	async downloadPackage(pkgInfo, fullName, name, urlPart, localVersion, targetVersion) {
-		if (localVersion === null) {
+	private async downloadPackage(packagePath: string, fullName: string, name: string, urlPart: string, localVersionID: number | null, targetVersion: Version): Promise<void> {
+		if (localVersionID === null) {
 			const latestVersion = await this.queryLatestVersion(urlPart);
 			this.emit('started', fullName);
-			await this.downloadPackageFull(pkgInfo, fullName, name, urlPart, latestVersion);
-			await this.downloadPackagePartial(pkgInfo, fullName, name, urlPart, latestVersion, targetVersion);
+			await this.downloadPackageFull(packagePath, fullName, name, urlPart, latestVersion);
+			return await this.downloadPackagePartial(packagePath, fullName, name, urlPart, latestVersion.version, targetVersion);
 		} else {
-			return await this.downloadPackagePartial(pkgInfo, fullName, name, urlPart, localVersion, targetVersion);
+			return await this.downloadPackagePartial(packagePath, fullName, name, urlPart, localVersionID, targetVersion);
 		}
 	}
 
-	async downloadPackageFull(pkgInfo, fullName, name, urlPart, targetVersion) {
-		const patchVersions = [{
+	private async downloadPackageFull(packagePath: string, fullName: string, name: string, urlPart: string, targetVersion: Version): Promise<void> {
+		const patchVersions: PatchVersion[] = [{
 			fromVersion: 0,
 			toVersion: targetVersion['version'],
 		}];
-		return await this.downloadPackagePartialInternal(pkgInfo, fullName, name, urlPart, patchVersions, targetVersion);
+		return await this.downloadPackagePartialInternal(packagePath, fullName, name, urlPart, patchVersions, targetVersion);
 	}
 
-	async downloadPackagePartial(pkgInfo, fullName, name, urlPart, localVersion, targetVersion) {
-		const localVersionID = localVersion['version'];
+
+	private async downloadPackagePartial(packagePath: string, fullName: string, name: string, urlPart: string, localVersionID: number, targetVersion: Version): Promise<void> {
 		const targetVersionID = targetVersion['version'];
 
 		// assume patches exist in linear order
 		const versionDir = targetVersionID > localVersionID ? 1 : -1;
-		let patchVersions = [];
+		const patchVersions: PatchVersion[] = [];
 		for (let version = localVersionID; version != targetVersionID; version += versionDir) {
 			patchVersions.push({
 				fromVersion: version,
@@ -301,29 +331,29 @@ class NextGenDownloader extends EventEmitter {
 			});
 		}
 
-		await this.downloadPackagePartialInternal(pkgInfo, fullName, name, urlPart, patchVersions, targetVersion);
+		await this.downloadPackagePartialInternal(packagePath, fullName, name, urlPart, patchVersions, targetVersion);
 	}
 
-	async downloadPackagePartialInternal(pkgInfo, fullName, name, urlPart, patchVersions, targetVersion) {
-		let patchJsonDls = [];
-		let patchJsonFiles = [];
+	private async downloadPackagePartialInternal(packagePath: string, fullName: string, name: string, urlPart: string, patchVersions: PatchVersion[], targetVersion: Version): Promise<void> {
+		const patchJsonDls = [];
+		const patchJsonFiles = [];
 		for (const patchVersion of patchVersions) {
 			const patchJsonUrl = `${urlPart}/patch/${patchVersion.fromVersion}-${patchVersion.toVersion}.json`;
-			const patchJsonFile = `${PKG_DIR}/${patchJsonUrl}`;
+			const patchJsonFile = `${this.pkgDir}/${patchJsonUrl}`;
 
 			if (!fs.existsSync(patchJsonFile)) {
-				patchJsonDls.push(downloadFileWithFallback(this.butlerDl, patchJsonUrl, patchJsonFile));
+				patchJsonDls.push(downloadFileWithFallback(this.butler, patchJsonUrl, patchJsonFile));
 			}
 			patchJsonFiles.push(patchJsonFile);
 		}
-		console.log(`${patchJsonDls.length} patches to download`);
+		this.emit('log', 'info', `${patchJsonDls.length} patches to download`);
 		await Promise.all(patchJsonDls);
 
-		let patchSizes = [];
-		let patchSigSizes = [];
+		const patchSizes = [];
+		const patchSigSizes = [];
 		let totalPatchSize = 0;
 		for (const patchJsonFile of patchJsonFiles) {
-			const patchesJson = JSON.parse(fs.readFileSync(patchJsonFile));
+			const patchesJson = JSON.parse(fs.readFileSync(patchJsonFile, 'utf8'));
 			const size = patchesJson['size'];
 			const sig_size = patchesJson['sig_size'];
 			patchSizes.push(size);
@@ -332,10 +362,9 @@ class NextGenDownloader extends EventEmitter {
 			totalPatchSize += sig_size;
 		}
 
-		this.totalPatches = patchSizes.length;
-		let patches = [];
+		const patches = [];
 		this.emit('started', fullName);
-		let downloads = [];
+		const downloads = [];
 		for (const [i, patchVersion] of patchVersions.entries()) {
 			const fromVersion = patchVersion.fromVersion;
 			const toVersion = patchVersion.toVersion;
@@ -343,7 +372,7 @@ class NextGenDownloader extends EventEmitter {
 			const patchUrl = `${urlPart}/patch/${fromVersion}-${toVersion}`;
 			const patchSigUrl = `${patchUrl}.sig`;
 
-			const patchFile = `${PKG_DIR}/${urlPart}/patch/${fromVersion}-${toVersion}`;
+			const patchFile = `${this.pkgDir}/${urlPart}/patch/${fromVersion}-${toVersion}`;
 			const patchSigFile = `${patchFile}.sig`;
 
 			if (!fs.existsSync(patchFile)) {
@@ -365,7 +394,7 @@ class NextGenDownloader extends EventEmitter {
 			patches.push(patchFile);
 		}
 
-		const parallelPatchDownload = new ParallelDownload();
+		const parallelPatchDownload = new ParallelDownload(this.butlerPath, this.tmpDir);
 		parallelPatchDownload.on('progress', (current, total) => {
 			this.emit('progress', fullName, current, total);
 		});
@@ -374,54 +403,51 @@ class NextGenDownloader extends EventEmitter {
 			this.emit('aborted', fullName, msg);
 		});
 		parallelPatchDownload.on('warn', msg => {
-			log.warn(msg);
+			this.emit('log', 'warn', msg);
 		});
 
 		await parallelPatchDownload.download(downloads);
+		await this.applyPatches(name, fullName, totalPatchSize, packagePath, patchVersions, patches, patchSizes, patchSigSizes, targetVersion);
+	}
 
-
+	private async applyPatches(name: string, fullName: string, totalPatchSize: number, packagePath: string,
+		patchVersions: PatchVersion[], patches: string[], patchSizes: number[], patchSigSizes: number[], targetVersion: Version): Promise<void> {
 		this.emit('started', `${fullName}: applying`);
 		// Represent patch application in MBs to satisfy our progress display logic
-		this.remainingPatchSize = totalPatchSize;
-		this.progressedPatchSize = 0;
-		let targetVersionCopy = JSON.parse(JSON.stringify(targetVersion));
+		let progressedPatchSize = 0;
+		const targetVersionCopy = JSON.parse(JSON.stringify(targetVersion));
 
-		const repo_path = `${springPlatform.writePath}/${pkgInfo['path']}`;
+		const repo_path = `${this.springWritePath}/${packagePath}`;
 		for (const [i, patchVersion] of patchVersions.entries()) {
 			makeDir(repo_path);
 
 			const fromVersion = patchVersion.fromVersion;
 			const toVersion = patchVersion.toVersion;
-			console.log(`Starting patch ${fromVersion} -> ${toVersion}`);
+			this.emit('log', 'info', `Starting patch ${fromVersion} -> ${toVersion}`);
 			// targetVersionCopy['patchProgress'] = '';
 			targetVersionCopy['version'] = toVersion;
-			await this.butlerApply.apply(patches[i], repo_path);
+			await this.butler.apply(patches[i], repo_path);
 			this.updateLocalVersion(name, targetVersionCopy);
-			console.log(`Finished patch ${fromVersion} -> ${toVersion}`);
+			this.emit('log', 'info', `Finished patch ${fromVersion} -> ${toVersion}`);
 
-			this.progressedPatchSize += patchSizes[i] + patchSigSizes[i];
-			this.emit('progress', fullName, this.progressedPatchSize, totalPatchSize);
+			progressedPatchSize += patchSizes[i] + patchSigSizes[i];
+			this.emit('progress', fullName, progressedPatchSize, totalPatchSize);
 		}
 	}
 
-	async maybeUpdateRapid(pkgInfo, targetVersion) {
-		const rapidTag = pkgInfo['rapid'];
-		if (rapidTag == null) {
-			return;
-		}
-
-		const versionsGz = path.join(springPlatform.writePath, `rapid/repos.springrts.com/${rapidTag}/versions.gz`);
-		setTouchedByNextgen(versionsGz, true);
+	private async updateRapidTag(rapidTag: string, targetVersion: Version): Promise<void> {
+		const versionsGz = path.join(this.springWritePath, `rapid/repos.springrts.com/${rapidTag}/versions.gz`);
+		this.nextgenRapidCompat.setTouchedByNextgen(versionsGz, true);
 
 		const fullRapidTag = `${rapidTag}:test`;
 		let archiveName = targetVersion['name'];
 		archiveName = archiveName.substring(0, archiveName.length - '.sdz'.length);
-		console.log(`${fullRapidTag} rapid tag now points to: ${archiveName}`);
+		this.emit('log', 'info', `${fullRapidTag} rapid tag now points to: ${archiveName}`);
 		const newLine = `${fullRapidTag},,,${archiveName}`;
 
-		let lines = [];
+		const lines = [];
 		if (fs.existsSync(versionsGz)) {
-			let lineReader = readline.createInterface({
+			const lineReader = readline.createInterface({
 				input: fs.createReadStream(versionsGz).pipe(zlib.createGunzip())
 			});
 			for await (let line of lineReader) {
@@ -444,33 +470,45 @@ class NextGenDownloader extends EventEmitter {
 		compress.end();
 	}
 
-	updateLocalVersion(name, latestVersion) {
-		const versionInfo = `${PKG_DIR}/${name}/local-version.json`;
+	private updateLocalVersion(name: string, latestVersion: Version): void {
+		const versionInfo = `${this.pkgDir}/${name}/local-version.json`;
 		fs.writeFileSync(versionInfo, JSON.stringify(latestVersion));
 	}
-
-	stopDownload() {
-		// TODO
-	}
 }
 
-async function downloadFileWithFallback(butlerDl, baseUrl, file) {
+async function downloadFileWithFallback(butler: Butler, baseUrl: string, file: string) {
 	try {
-		return await butlerDl.download(`${PKG_URL}/${baseUrl}`, file);
+		return await butler.download(`${PKG_URL}/${baseUrl}`, file);
 	} catch (err) {
-		log.warn(`Primary url download failed ${PKG_URL}/${baseUrl} -> ${file}. Retrying with fallback: ${FALLBACK_URL}/${baseUrl}`);
-		return await butlerDl.download(`${FALLBACK_URL}/${baseUrl}`, file);
+		console.warn(`Primary url download failed ${PKG_URL}/${baseUrl} -> ${file}. Retrying with fallback: ${FALLBACK_URL}/${baseUrl}`);
+		return await butler.download(`${FALLBACK_URL}/${baseUrl}`, file);
 	}
 }
 
+interface Download {
+	url: string,
+	path: string,
+	size: number,
+}
 
 class ParallelDownload extends EventEmitter {
-	async download(downloads) {
-		let promises = [];
+	private downloads?: Download[];
+	private butlerPath: string;
+	private tmpDir: string;
+
+	constructor(butlerPath: string, tmpDir: string) {
+		super();
+
+		this.butlerPath = butlerPath;
+		this.tmpDir = tmpDir;
+	}
+
+	async download(downloads: Download[]) {
+		const promises = [];
 		this.downloads = downloads;
 		let combinedTotal = 0;
 		let combinedProgress = 0;
-		let downloadProgresses = [];
+		const downloadProgresses: number[] = [];
 		for (const download of downloads) {
 			combinedTotal += download['size'];
 			downloadProgresses.push(0);
@@ -480,7 +518,7 @@ class ParallelDownload extends EventEmitter {
 			const url = download['url'];
 			const path = download['path'];
 
-			const downloader = new ButlerDownload();
+			const downloader = new Butler(this.butlerPath, this.tmpDir);
 
 			downloader.on('progress', current => {
 				combinedProgress += current - downloadProgresses[i];
@@ -494,7 +532,7 @@ class ParallelDownload extends EventEmitter {
 			// });
 
 			downloader.on('warn', msg => {
-				log.warn(`${download}: ${msg}`);
+				this.emit('log', 'warn', `${download}: ${msg}`);
 			});
 
 			promises.push(downloadFileWithFallback(downloader, url, path));
@@ -504,52 +542,6 @@ class ParallelDownload extends EventEmitter {
 	}
 }
 
-function setTouchedByNextgen(versionsGz, isTouched) {
-	let touchedFiles = [];
-	const touchedFilesRegistry = `${PKG_DIR}/touched_rapid.json`;
-	if (fs.existsSync(touchedFilesRegistry)) {
-		touchedFiles = JSON.parse(fs.readFileSync(touchedFilesRegistry));
-	}
-	if (isTouched) {
-		touchedFiles.push(versionsGz);
-	} else {
-		const index = touchedFiles.indexOf(versionsGz);
-		if (index > -1) {
-			touchedFiles.splice(index, 1);
-		}
-	}
-
-	fs.writeFileSync(touchedFilesRegistry, JSON.stringify(touchedFiles));
-}
-
-function clearTouchedByNextgen() {
-	const touchedFilesRegistry = `${PKG_DIR}/touched_rapid.json`;
-	if (fs.existsSync(touchedFilesRegistry)) {
-		fs.unlinkSync(touchedFilesRegistry);
-	}
-}
-
-function isTouchedByNextgen(versionsGz) {
-	return getTouchedByNextgen().includes(versionsGz);
-}
-
-function getTouchedByNextgen() {
-	const touchedFilesRegistry = `${PKG_DIR}/touched_rapid.json`;
-	if (!fs.existsSync(touchedFilesRegistry)) {
-		return [];
-	}
-
-	try {
-		return JSON.parse(fs.readFileSync(touchedFilesRegistry));
-	} catch (err) {
-		return [];
-	}
-}
-
-module.exports = {
-	NextGenDownloader: NextGenDownloader,
-	setTouchedByNextgen: setTouchedByNextgen,
-	getTouchedByNextgen: getTouchedByNextgen,
-	isTouchedByNextgen: isTouchedByNextgen,
-	clearTouchedByNextgen: clearTouchedByNextgen,
+export {
+	NextGenDownloader,
 };

@@ -1,6 +1,4 @@
-'use strict';
-
-const { parse, fillChannelPlatform, defaultPlatform, defaultChannel } = require('../src/nextgen_version_parse');
+import { parse, fillChannelPlatform, defaultPlatform, defaultChannel } from '../src/nextgen_version_parse';
 
 // parse tests
 
@@ -33,7 +31,6 @@ test('bad-name', () => {
 	expect(() => { parse(''); }).toThrow();
 	expect(() => { parse('/'); }).toThrow();
 	expect(() => { parse('//'); }).toThrow();
-	expect(() => { parse(null); }).toThrow();
 	expect(() => { parse('%/test'); }).toThrow();
 	expect(() => { parse('#/test'); }).toThrow();
 });
