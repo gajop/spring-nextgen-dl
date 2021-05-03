@@ -476,7 +476,7 @@ async function downloadFileWithFallback(butler: Butler, baseUrl: string, file: s
 	try {
 		return await butler.download(`${PKG_URL}/${baseUrl}`, file);
 	} catch (err) {
-		console.warn(`Primary url download failed ${PKG_URL}/${baseUrl} -> ${file}. Retrying with fallback: ${FALLBACK_URL}/${baseUrl}`);
+		butler.emit('log', 'warn', `Primary url download failed ${PKG_URL}/${baseUrl} -> ${file}. Retrying with fallback: ${FALLBACK_URL}/${baseUrl}`);
 		return await butler.download(`${FALLBACK_URL}/${baseUrl}`, file);
 	}
 }
