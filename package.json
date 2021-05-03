@@ -1,6 +1,6 @@
 {
   "name": "spring-nextgen-dl",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "SpringRTS NextGen download system",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

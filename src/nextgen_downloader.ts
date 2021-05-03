@@ -165,7 +165,8 @@ class NextGenDownloader extends EventEmitter {
 				: this.queryLatestVersion(urlPart)
 		);
 
-		if (localVersion != null) {
+		const localVersionID = localVersion != null ? localVersion['version'] : null;
+		if (localVersionID != null) {
 			if (localVersion['version'] == targetVersion['version']) {
 				this.emit('log', 'info', `No download necessary for ${fullName}`);
 
@@ -183,7 +184,7 @@ class NextGenDownloader extends EventEmitter {
 		}
 
 		const packagePath = pkgInfo['path'];
-		await this.downloadPackage(packagePath, fullName, name, urlPart, localVersion['version'], targetVersion);
+		await this.downloadPackage(packagePath, fullName, name, urlPart, localVersionID, targetVersion);
 		this.updateLocalVersion(name, targetVersion);
 		if (versionID == null) {
 			const rapidTag = pkgInfo['rapid'];
